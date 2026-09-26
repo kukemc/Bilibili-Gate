@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import { useSnapshot } from 'valtio'
-import { settings } from '$modules/settings'
+import { initialSettings, settings } from '$modules/settings'
 import { loadDanmakuSegment, resolveDanmakuCid, type DanmakuComment } from './danmaku-data'
 import { DanmakuRenderer } from './danmaku-renderer'
 
@@ -133,8 +133,8 @@ export function PreviewDanmaku({
   }, [bvid, cid, options.enabled, retry, videoRef])
 
   useEffect(() => {
-    rendererRef.current?.setOptions({ opacity: options.opacity, fontScale: options.fontScale, area: options.area })
-  }, [options.opacity, options.fontScale, options.area])
+    rendererRef.current?.setOptions(options)
+  }, [options])
 
   return (
     <>
@@ -174,7 +174,21 @@ export function PreviewDanmaku({
           >
             弹幕{options.enabled ? '开' : '关'}
           </summary>
-          <div style={{ display: 'grid', gap: 8, padding: 10, background: '#111e', borderRadius: 6 }}>
+          <div
+            style={{
+              display: 'grid',
+              gap: 10,
+              padding: 12,
+              background: '#111f',
+              borderRadius: 6,
+              width: 290,
+              maxWidth: '100%',
+              maxHeight: 'min(65vh, 340px)',
+              overflowY: 'auto',
+              overscrollBehavior: 'contain',
+            }}
+            onWheel={(e) => e.stopPropagation()}
+          >
             <label>
               <input
                 type='checkbox'
@@ -228,6 +242,64 @@ export function PreviewDanmaku({
                 <option value={1}>全屏</option>
               </select>
             </label>
+            {(
+              [
+                ['scrollDuration', '滚动穿屏时长', 6, 20, 1, '秒（越大越慢）'],
+                ['fixedDuration', '顶/底部停留', 2, 12, 1, '秒'],
+                ['topPadding', '顶部留白', 0, 160, 4, 'px'],
+                ['bottomPadding', '底部留白', 0, 160, 4, 'px'],
+                ['laneGap', '弹幕行间距', 0, 32, 2, 'px'],
+                ['maxComments', '同屏弹幕上限', 20, 160, 10, '条'],
+              ] as const
+            ).map(([key, label, min, max, step, unit]) => (
+              <label key={key} style={{ display: 'grid', gap: 4 }}>
+                <span>
+                  {label}：{options[key]} {unit}
+                </span>
+                <input
+                  aria-label={label}
+                  type='range'
+                  min={min}
+                  max={max}
+                  step={step}
+                  value={options[key]}
+                  onChange={(e) => {
+                    settings.videoCard.videoPreview.danmaku[key] = Number(e.target.value)
+                  }}
+                />
+              </label>
+            ))}
+            <fieldset style={{ display: 'flex', flexWrap: 'wrap', gap: 10, border: '1px solid #ffffff40', padding: 8 }}>
+              <legend>显示类型</legend>
+              {(
+                [
+                  ['showScroll', '滚动/逆向'],
+                  ['showTop', '顶部'],
+                  ['showBottom', '底部'],
+                  ['showAdvanced', '高级定位'],
+                ] as const
+              ).map(([key, label]) => (
+                <label key={key}>
+                  <input
+                    type='checkbox'
+                    checked={options[key]}
+                    onChange={(e) => {
+                      settings.videoCard.videoPreview.danmaku[key] = e.target.checked
+                    }}
+                  />{' '}
+                  {label}
+                </label>
+              ))}
+            </fieldset>
+            <span>时长按视频时间计算，随播放倍速同步；上下留白和行间距作用于普通弹幕，高级定位保留作者坐标。</span>
+            <button
+              type='button'
+              onClick={() => {
+                Object.assign(settings.videoCard.videoPreview.danmaku, initialSettings.videoCard.videoPreview.danmaku)
+              }}
+            >
+              恢复默认弹幕设置
+            </button>
             <span>支持滚动、顶/底部、逆向和定位弹幕；不执行代码/BAS 弹幕。</span>
           </div>
         </details>

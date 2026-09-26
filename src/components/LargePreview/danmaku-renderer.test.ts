@@ -3,10 +3,12 @@ import {
   advancedPosition,
   DanmakuRenderer,
   danmakuX,
+  DEFAULT_DANMAKU_OPTIONS,
   lanesCollide,
   layoutDanmaku,
   MAX_ACTIVE_DANMAKU,
   parseAdvancedDanmaku,
+  type DanmakuOptions,
 } from './danmaku-renderer'
 import type { DanmakuComment } from './danmaku-data'
 
@@ -34,18 +36,18 @@ describe('danmaku layout and modes', () => {
     for (const mode of [1, 2, 3]) {
       const [item] = layout([comment({ mode })])
       expect(danmakuX(item, 0, 640)).toBe(640)
-      expect(danmakuX(item, 8, 640)).toBe(-125)
-      expect(danmakuX(item, 4, 640)).toBe(257.5)
+      expect(danmakuX(item, 12, 640)).toBe(-125)
+      expect(danmakuX(item, 6, 640)).toBe(257.5)
     }
     const [reverse] = layout([comment({ mode: 6 })])
     expect(danmakuX(reverse, 0, 640)).toBe(-125)
-    expect(danmakuX(reverse, 8, 640)).toBe(640)
+    expect(danmakuX(reverse, 12, 640)).toBe(640)
     const [top] = layout([comment({ mode: 5 })])
     const [bottom] = layout([comment({ mode: 4 })])
-    expect(top.y).toBe(0)
-    expect(bottom.y + bottom.height).toBe(360)
+    expect(top.y).toBe(40)
+    expect(bottom.y + bottom.height).toBe(312)
     expect(danmakuX(top, 2, 640)).toBe(257.5)
-    expect(top.end).toBe(4)
+    expect(top.end).toBe(5)
   })
 
   it('never executes mode 8 or treats BAS / invalid advanced payloads as ordinary text', () => {
@@ -90,9 +92,95 @@ describe('danmaku layout and modes', () => {
 
   it('bounds advanced active count, truncates text and respects zero area', () => {
     const comments = Array.from({ length: 500 }, (_, i) => comment({ id: String(i), mode: 7, text: advanced() }))
-    expect(layout(comments)).toHaveLength(MAX_ACTIVE_DANMAKU)
+    expect(layout(comments)).toHaveLength(DEFAULT_DANMAKU_OPTIONS.maxComments)
     expect(layout([comment({ text: 'x'.repeat(10000) })])[0].text).toHaveLength(2048)
     expect(layoutDanmaku(comments, 640, 360, { ...options, area: 0 }, () => 20)).toEqual([])
+  })
+})
+
+describe('configurable layout', () => {
+  const configured = (comments: DanmakuComment[], settings: DanmakuOptions = {}, height = 360) =>
+    layoutDanmaku(comments, 640, height, settings, (text, size) => text.length * size)
+
+  it('exports complete defaults and accepts legacy partial options', () => {
+    expect(DEFAULT_DANMAKU_OPTIONS).toEqual({
+      opacity: 0.85,
+      fontScale: 1,
+      area: 1,
+      scrollDuration: 12,
+      fixedDuration: 5,
+      topPadding: 40,
+      bottomPadding: 48,
+      laneGap: 4,
+      maxComments: 100,
+      showScroll: true,
+      showTop: true,
+      showBottom: true,
+      showAdvanced: true,
+    })
+    expect(configured([comment()])).toEqual(layout([comment()]))
+  })
+
+  it('applies area after CSS-pixel padding and anchors fixed comments inside it', () => {
+    const settings = { topPadding: 30, bottomPadding: 50, area: 0.5 }
+    const [top] = configured([comment({ mode: 5 })], settings)
+    const [bottom] = configured([comment({ mode: 4 })], settings)
+    expect(top.y).toBe(30)
+    expect(bottom.y + bottom.height).toBe(30 + (360 - 30 - 50) * 0.5)
+    for (const height of [40, 64, 100]) {
+      const [item] = configured([comment()], { topPadding: 160, bottomPadding: 160 }, height)
+      expect(item).toBeDefined()
+      expect(item.y).toBeGreaterThanOrEqual(0)
+      expect(item.y + item.height).toBeLessThanOrEqual(height)
+    }
+  })
+
+  it.each([0, 4, 16])('uses exactly font height plus %ipx gap without skipping lanes', (laneGap) => {
+    const items = configured([comment(), comment(), comment()], { laneGap })
+    expect(items).toHaveLength(3)
+    expect(items[1].y - items[0].y).toBe(items[0].height + laneGap)
+    expect(items[2].y - items[1].y).toBe(items[1].height + laneGap)
+    expect(lanesCollide(items[0], items[1], 640, laneGap)).toBe(false)
+  })
+
+  it('slows both scroll directions and configures fixed lifetimes independently of advanced mode', () => {
+    for (const mode of [1, 2, 3, 6]) {
+      const [fast] = configured([comment({ mode })], { scrollDuration: 6 })
+      const [slow] = configured([comment({ mode })], { scrollDuration: 20 })
+      expect(fast.end).toBe(6)
+      expect(slow.end).toBe(20)
+      const initial = danmakuX(slow, 0, 640)
+      expect(Math.abs(danmakuX(slow, 3, 640) - initial)).toBeLessThan(Math.abs(danmakuX(fast, 3, 640) - initial))
+    }
+    for (const mode of [4, 5]) expect(configured([comment({ mode })], { fixedDuration: 12 })[0].end).toBe(12)
+    expect(configured([comment({ mode: 7, text: advanced() })], { scrollDuration: 6, fixedDuration: 2 })[0].end).toBe(
+      10,
+    )
+  })
+
+  it.each([
+    ['showScroll', [4, 5, 7]],
+    ['showTop', [1, 2, 3, 4, 6, 7]],
+    ['showBottom', [1, 2, 3, 5, 6, 7]],
+    ['showAdvanced', [1, 2, 3, 4, 5, 6]],
+  ] as const)('filters %s before allocating lanes', (key, modes) => {
+    const comments = [1, 2, 3, 4, 5, 6, 7].map((mode) => comment({ mode, text: mode === 7 ? advanced() : 'hello' }))
+    expect(configured(comments, { [key]: false }, 1000).map((item) => item.comment.mode)).toEqual(modes)
+  })
+
+  it('clamps duration, padding, gap and count, and falls back for nonfinite numbers', () => {
+    const [minimum] = configured([comment()], { scrollDuration: -1, topPadding: -1, laneGap: -1 })
+    expect(minimum.end).toBe(6)
+    expect(minimum.y).toBe(0)
+    expect(configured([comment()], { scrollDuration: Infinity })[0].end).toBe(12)
+    expect(configured([comment({ mode: 5 })], { fixedDuration: -1 })[0].end).toBe(2)
+    const [maximum] = configured([comment()], { scrollDuration: 99, topPadding: 999 }, 1000)
+    expect(maximum.end).toBe(20)
+    expect(maximum.y).toBe(160)
+    const comments = Array.from({ length: 200 }, () => comment({ mode: 7, text: advanced() }))
+    expect(configured(comments, { maxComments: 1 })).toHaveLength(20)
+    expect(configured(comments, { maxComments: 20.9 })).toHaveLength(20)
+    expect(configured(comments, { maxComments: 999 })).toHaveLength(MAX_ACTIVE_DANMAKU)
   })
 })
 
@@ -200,6 +288,73 @@ function fixture() {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('renderer lifecycle', () => {
+  it('rebuilds layout for option changes while preserving omitted and invalid fields', () => {
+    const f = fixture()
+    f.renderer.setComments([comment(), comment()])
+    f.renderer.setOptions({ topPadding: 20, laneGap: 16, scrollDuration: 20 })
+    f.video.currentTime = 10
+    f.context.translate.mockClear()
+    f.event('seeked')
+    expect(f.context.translate.mock.calls).toEqual([
+      [270, 20],
+      [270, 67.25],
+    ])
+    f.context.translate.mockClear()
+    f.renderer.setOptions({ scrollDuration: NaN, topPadding: Infinity, showScroll: 'false' as unknown as boolean })
+    expect(f.context.translate.mock.calls).toEqual([
+      [270, 20],
+      [270, 67.25],
+    ])
+    f.context.fillText.mockClear()
+    f.renderer.setOptions({ showScroll: false })
+    expect(f.context.fillText).not.toHaveBeenCalled()
+    f.context.translate.mockClear()
+    f.renderer.setOptions({ showScroll: true, topPadding: -1 })
+    expect(f.context.translate.mock.calls).toEqual([
+      [270, 0],
+      [270, 47.25],
+    ])
+    f.context.fillText.mockClear()
+    f.renderer.setOptions({ scrollDuration: 6 })
+    expect(f.context.fillText).not.toHaveBeenCalled()
+    f.renderer.destroy()
+  })
+
+  it('rebuilds and caps active rendering when maxComments changes', () => {
+    const f = fixture()
+    f.renderer.setComments(Array.from({ length: 200 }, () => comment({ mode: 7, text: advanced() })))
+    for (const [maxComments, expected] of [
+      [20, 20],
+      [40, 40],
+      [999, 160],
+      [-1, 20],
+    ]) {
+      f.context.fillText.mockClear()
+      f.renderer.setOptions({ maxComments })
+      expect(f.context.fillText).toHaveBeenCalledTimes(expected)
+      f.video.currentTime = 5
+      f.context.fillText.mockClear()
+      f.event('seeked')
+      expect(f.context.fillText).toHaveBeenCalledTimes(expected)
+    }
+    f.renderer.destroy()
+  })
+
+  it('reconstructs 20-second scrolling comments after seeking and leaves advanced duration unchanged', () => {
+    const f = fixture()
+    f.renderer.setOptions({ scrollDuration: 20, fixedDuration: 2 })
+    f.renderer.setComments([comment(), comment({ mode: 7, text: advanced({ 3: 30 }) })])
+    f.video.currentTime = 19
+    f.context.fillText.mockClear()
+    f.event('seeked')
+    expect(f.context.fillText).toHaveBeenCalledTimes(2)
+    f.video.currentTime = 21
+    f.context.fillText.mockClear()
+    f.event('seeked')
+    expect(f.context.fillText).toHaveBeenCalledTimes(1)
+    f.renderer.destroy()
+  })
+
   it('renders when paused, follows media time, stops RAF and reconstructs identical seek lanes', () => {
     const f = fixture()
     f.renderer.setComments([comment({ time: 0 }), comment({ id: '2', time: 1, mode: 6 })])
