@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili-Gate 弹幕预览版
 // @namespace    https://github.com/kukemc/Bilibili-Gate
-// @version      0.35.8
+// @version      0.35.9
 // @author       magicdawn; kukemc (danmaku fork)
 // @description  Bilibili 自定义首页
 // @license      MIT

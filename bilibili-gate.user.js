@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili-Gate 弹幕预览版
 // @namespace    https://github.com/kukemc/Bilibili-Gate
-// @version      0.35.8
+// @version      0.35.9
 // @author       magicdawn; kukemc (danmaku fork)
 // @description  Bilibili 自定义首页
 // @license      MIT
@@ -12997,6 +12997,381 @@
 		container.dataset.gateReactRoot = "true";
 		return root;
 	}
+	var DEFAULT_DANMAKU_OPTIONS = {
+		opacity: .85,
+		fontScale: 1,
+		area: 1,
+		scrollDuration: 12,
+		fixedDuration: 5,
+		topPadding: 40,
+		bottomPadding: 48,
+		laneGap: 4,
+		maxComments: 100,
+		showScroll: true,
+		showTop: true,
+		showBottom: true,
+		showAdvanced: true
+	};
+	var MAX_LIFETIME = 30;
+	var MAX_TEXT_LENGTH = 2048;
+	var GAP = 8;
+	var FONT = "\"Microsoft YaHei\", \"PingFang SC\", sans-serif";
+	var clamp$1 = (n, min, max) => Math.min(max, Math.max(min, n));
+	var finite = (value, fallback) => {
+		if (typeof value !== "number" && typeof value !== "string") return fallback;
+		const n = Number(value);
+		return Number.isFinite(n) ? n : fallback;
+	};
+	function normalizeOptions$1(options, fallback = DEFAULT_DANMAKU_OPTIONS) {
+		return {
+			opacity: clamp$1(finite(options.opacity, fallback.opacity), 0, 1),
+			fontScale: clamp$1(finite(options.fontScale, fallback.fontScale), .25, 4),
+			area: clamp$1(finite(options.area, fallback.area), 0, 1),
+			scrollDuration: clamp$1(finite(options.scrollDuration, fallback.scrollDuration), 6, 20),
+			fixedDuration: clamp$1(finite(options.fixedDuration, fallback.fixedDuration), 2, 12),
+			topPadding: clamp$1(finite(options.topPadding, fallback.topPadding), 0, 160),
+			bottomPadding: clamp$1(finite(options.bottomPadding, fallback.bottomPadding), 0, 160),
+			laneGap: clamp$1(finite(options.laneGap, fallback.laneGap), 0, 32),
+			maxComments: Math.floor(clamp$1(finite(options.maxComments, fallback.maxComments), 20, 160)),
+			showScroll: typeof options.showScroll === "boolean" ? options.showScroll : fallback.showScroll,
+			showTop: typeof options.showTop === "boolean" ? options.showTop : fallback.showTop,
+			showBottom: typeof options.showBottom === "boolean" ? options.showBottom : fallback.showBottom,
+			showAdvanced: typeof options.showAdvanced === "boolean" ? options.showAdvanced : fallback.showAdvanced
+		};
+	}
+	function parseAdvancedDanmaku(text) {
+		if (text.length > 32768) return null;
+		let data;
+		try {
+			data = JSON.parse(text);
+		} catch {
+			return null;
+		}
+		if (!Array.isArray(data) || data.length < 5 || typeof data[4] !== "string") return null;
+		const x = finite(data[0], NaN);
+		const y = finite(data[1], NaN);
+		const duration = finite(data[3], NaN);
+		if (!Number.isFinite(x) || !Number.isFinite(y) || !(duration > 0)) return null;
+		const alpha = String(data[2] ?? "1").split("-");
+		const opacityFrom = clamp$1(finite(alpha[0], 1), 0, 1);
+		const path = [];
+		if (typeof data[14] === "string") {
+			const commands = data[14].trim().split(/(?=[ML])/);
+			for (const command of commands) {
+				if (path.length >= 256) break;
+				const pair = command.slice(1).trim().split(/[\s,]+/);
+				const point = {
+					x: Number(pair[0]),
+					y: Number(pair[1])
+				};
+				if (!/^[ML]/.test(command) || pair.length !== 2 || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+					path.length = 0;
+					break;
+				}
+				path.push(point);
+			}
+		}
+		return {
+			text: data[4].slice(0, MAX_TEXT_LENGTH),
+			from: {
+				x,
+				y
+			},
+			to: {
+				x: finite(data[7], x),
+				y: finite(data[8], y)
+			},
+			opacityFrom,
+			opacityTo: clamp$1(finite(alpha[1], opacityFrom), 0, 1),
+			duration: Math.min(duration, MAX_LIFETIME),
+			moveDuration: clamp$1(finite(data[9], duration * 1e3) / 1e3, 0, MAX_LIFETIME),
+			delay: clamp$1(finite(data[10], 0) / 1e3, 0, MAX_LIFETIME),
+			rotateZ: finite(data[5], 0),
+			rotateY: finite(data[6], 0),
+			outline: data[11] !== false && data[11] !== "false",
+			path
+		};
+	}
+	function project(point, width, height) {
+		return {
+			x: (point.x >= 0 && point.x <= 1 ? point.x : point.x / 672) * width,
+			y: (point.y >= 0 && point.y <= 1 ? point.y : point.y / 438) * height
+		};
+	}
+	function advancedPosition(value, age, width, height) {
+		const progress = value.moveDuration === 0 ? age >= value.delay ? 1 : 0 : clamp$1((age - value.delay) / value.moveDuration, 0, 1);
+		const points = (value.path.length > 1 ? value.path : [value.from, value.to]).map((p) => project(p, width, height));
+		const lengths = points.slice(1).map((p, i) => Math.hypot(p.x - points[i].x, p.y - points[i].y));
+		let distance = lengths.reduce((sum, length) => sum + length, 0) * progress;
+		let position = points.at(-1);
+		for (const [i, length] of lengths.entries()) {
+			if (distance <= length) {
+				const ratio = length ? distance / length : 0;
+				position = {
+					x: points[i].x + (points[i + 1].x - points[i].x) * ratio,
+					y: points[i].y + (points[i + 1].y - points[i].y) * ratio
+				};
+				break;
+			}
+			distance -= lengths[i];
+		}
+		return {
+			...position,
+			opacity: value.opacityFrom + (value.opacityTo - value.opacityFrom) * clamp$1(age / value.duration, 0, 1)
+		};
+	}
+	function danmakuX(item, time, viewportWidth) {
+		const progress = clamp$1((time - item.start) / (item.end - item.start), 0, 1);
+		if (item.comment.mode === 6) return -item.width + progress * (viewportWidth + item.width);
+		if (item.comment.mode === 4 || item.comment.mode === 5) return (viewportWidth - item.width) / 2;
+		return viewportWidth - progress * (viewportWidth + item.width);
+	}
+	function lanesCollide(a, b, width, gap = DEFAULT_DANMAKU_OPTIONS.laneGap) {
+		if (a.y + a.height + gap <= b.y || b.y + b.height + gap <= a.y) return false;
+		const start = Math.max(a.start, b.start);
+		const end = Math.min(a.end, b.end);
+		if (end <= start) return false;
+		const deltaStart = danmakuX(a, start, width) - danmakuX(b, start, width);
+		const deltaEnd = danmakuX(a, end, width) - danmakuX(b, end, width);
+		return Math.max(deltaStart, deltaEnd) > -a.width - GAP && Math.min(deltaStart, deltaEnd) < b.width + GAP;
+	}
+	function layoutDanmaku(comments, width, height, options, measure) {
+		const settings = normalizeOptions$1(options);
+		if (width <= 0 || height <= 0 || settings.area <= 0) return [];
+		const result = [];
+		let active = [];
+		const padding = settings.topPadding + settings.bottomPadding;
+		const minimumHeight = Math.min(height, 25 * settings.fontScale * 1.25 / settings.area);
+		const paddingScale = padding ? Math.min(1, Math.max(0, height - minimumHeight) / padding) : 1;
+		const top = settings.topPadding * paddingScale;
+		const availableHeight = (height - padding * paddingScale) * settings.area;
+		for (const comment of [...comments].sort((a, b) => a.time - b.time)) {
+			if (!Number.isFinite(comment.time) || comment.time < 0 || ![
+				1,
+				2,
+				3,
+				4,
+				5,
+				6,
+				7
+			].includes(comment.mode)) continue;
+			if (comment.mode === 7 && !settings.showAdvanced || comment.mode === 5 && !settings.showTop || comment.mode === 4 && !settings.showBottom || [
+				1,
+				2,
+				3,
+				6
+			].includes(comment.mode) && !settings.showScroll) continue;
+			const advanced = comment.mode === 7 ? parseAdvancedDanmaku(comment.text) : null;
+			if (comment.mode === 7 && !advanced) continue;
+			active = active.filter((item) => item.end > comment.time);
+			if (active.length >= settings.maxComments) continue;
+			const text = (advanced?.text ?? comment.text).slice(0, MAX_TEXT_LENGTH);
+			if (!text) continue;
+			const fontSize = clamp$1(finite(comment.fontSize, 25), 8, 96) * settings.fontScale;
+			const lines = text.split(/\r?\n/).slice(0, 16);
+			const item = {
+				comment,
+				text: lines.join("\n"),
+				start: comment.time,
+				end: comment.time + (advanced?.duration ?? ([4, 5].includes(comment.mode) ? settings.fixedDuration : settings.scrollDuration)),
+				width: Math.max(...lines.map((line) => measure(line, fontSize))),
+				height: lines.length * fontSize * 1.25,
+				fontSize,
+				y: 0,
+				advanced
+			};
+			let placed = !!advanced;
+			if (!advanced) {
+				const step = item.height + settings.laneGap;
+				const slots = Math.min(128, Math.floor((availableHeight - item.height) / step) + 1);
+				for (let lane = 0; lane < slots; lane++) {
+					item.y = top + (comment.mode === 4 ? availableHeight - item.height - lane * step : lane * step);
+					if (active.every((other) => other.advanced || !lanesCollide(item, other, width, settings.laneGap))) {
+						placed = true;
+						break;
+					}
+				}
+			}
+			if (placed) {
+				result.push(item);
+				active.push(item);
+			}
+		}
+		return result;
+	}
+	function lowerBound(items, time) {
+		let low = 0;
+		let high = items.length;
+		while (low < high) {
+			const mid = low + high >>> 1;
+			if (items[mid].start < time) low = mid + 1;
+			else high = mid;
+		}
+		return low;
+	}
+	var DanmakuRenderer = class {
+		canvas;
+		video;
+		context;
+		options = { ...DEFAULT_DANMAKU_OPTIONS };
+		comments = [];
+		layout = [];
+		active = [];
+		cursor = 0;
+		lastTime = -Infinity;
+		width = 0;
+		height = 0;
+		dpr = 1;
+		raf = null;
+		destroyed = false;
+		observer;
+		dprQuery = null;
+		events = [
+			"play",
+			"playing",
+			"pause",
+			"ended",
+			"seeking",
+			"seeked",
+			"timeupdate",
+			"loadedmetadata",
+			"emptied"
+		];
+		constructor(canvas, video) {
+			this.canvas = canvas;
+			this.video = video;
+			this.context = canvas.getContext("2d");
+			this.observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(this.resize);
+			this.observer?.observe(canvas);
+			window.addEventListener("resize", this.resize);
+			for (const event of this.events) video.addEventListener(event, this.onVideoEvent);
+			this.watchDpr();
+			this.resize();
+			this.schedule();
+		}
+		setComments(comments) {
+			if (this.destroyed) return;
+			this.comments = comments.map((comment) => ({ ...comment }));
+			this.rebuild();
+		}
+		setOptions(options) {
+			if (this.destroyed) return;
+			const previous = this.options;
+			this.options = normalizeOptions$1(options, previous);
+			if (Object.keys(this.options).some((key) => key !== "opacity" && this.options[key] !== previous[key])) this.rebuild();
+			else this.render();
+		}
+		destroy() {
+			if (this.destroyed) return;
+			this.destroyed = true;
+			this.stop();
+			this.observer?.disconnect();
+			this.dprQuery?.removeEventListener("change", this.onDprChange);
+			window.removeEventListener("resize", this.resize);
+			for (const event of this.events) this.video.removeEventListener(event, this.onVideoEvent);
+			this.comments = [];
+			this.layout = [];
+			this.active = [];
+			this.context?.clearRect(0, 0, this.width, this.height);
+		}
+		watchDpr() {
+			this.dprQuery?.removeEventListener("change", this.onDprChange);
+			this.dprQuery = typeof window.matchMedia === "function" ? window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`) : null;
+			this.dprQuery?.addEventListener("change", this.onDprChange);
+		}
+		onDprChange = () => {
+			this.watchDpr();
+			this.resize();
+		};
+		resize = () => {
+			if (this.destroyed) return;
+			const rect = this.canvas.getBoundingClientRect();
+			const width = Math.max(0, rect.width);
+			const height = Math.max(0, rect.height);
+			const dpr = Math.max(.1, window.devicePixelRatio || 1);
+			const changed = width !== this.width || height !== this.height;
+			if (!changed && this.dpr === dpr) return;
+			this.width = width;
+			this.height = height;
+			this.dpr = dpr;
+			this.canvas.width = Math.round(width * dpr);
+			this.canvas.height = Math.round(height * dpr);
+			this.context?.setTransform(dpr, 0, 0, dpr, 0, 0);
+			if (changed) this.rebuild();
+			else this.render();
+		};
+		rebuild() {
+			const ctx = this.context;
+			if (!ctx) return;
+			this.layout = layoutDanmaku(this.comments, this.width, this.height, this.options, (text, size) => {
+				ctx.font = `bold ${size}px ${FONT}`;
+				return ctx.measureText(text).width;
+			});
+			this.lastTime = -Infinity;
+			this.render();
+		}
+		onVideoEvent = (event) => {
+			if (this.destroyed) return;
+			if (event.type === "seeking" || event.type === "seeked" || event.type === "emptied") this.lastTime = -Infinity;
+			this.render();
+			if (this.video.paused || this.video.ended || this.video.seeking) this.stop();
+			else this.schedule();
+		};
+		stop() {
+			if (this.raf !== null) cancelAnimationFrame(this.raf);
+			this.raf = null;
+		}
+		schedule() {
+			if (this.destroyed || !this.context || this.raf !== null || this.video.paused || this.video.ended || this.video.seeking) return;
+			this.raf = requestAnimationFrame(this.tick);
+		}
+		tick = () => {
+			this.raf = null;
+			if (this.destroyed) return;
+			if (this.dpr !== Math.max(.1, window.devicePixelRatio || 1)) this.resize();
+			this.render();
+			this.schedule();
+		};
+		render() {
+			const ctx = this.context;
+			if (!ctx || this.destroyed) return;
+			const time = finite(this.video.currentTime, 0);
+			if (time < this.lastTime || time - this.lastTime > 1) {
+				this.active = [];
+				this.cursor = lowerBound(this.layout, time - MAX_LIFETIME);
+			} else this.active = this.active.filter((item) => item.end > time);
+			while (this.cursor < this.layout.length && this.layout[this.cursor].start <= time) {
+				const item = this.layout[this.cursor++];
+				if (item.end > time && this.active.length < this.options.maxComments) this.active.push(item);
+			}
+			this.lastTime = time;
+			ctx.clearRect(0, 0, this.width, this.height);
+			if (!this.options.opacity) return;
+			ctx.textBaseline = "top";
+			ctx.lineJoin = "round";
+			for (const item of this.active) {
+				ctx.save();
+				ctx.font = `bold ${item.fontSize}px ${FONT}`;
+				ctx.fillStyle = `#${(finite(item.comment.color, 16777215) & 16777215).toString(16).padStart(6, "0")}`;
+				ctx.strokeStyle = "#000000";
+				ctx.lineWidth = Math.max(2, item.fontSize / 12);
+				ctx.globalAlpha = this.options.opacity;
+				if (item.advanced) {
+					const position = advancedPosition(item.advanced, time - item.start, this.width, this.height);
+					ctx.globalAlpha *= position.opacity;
+					ctx.translate(position.x, position.y);
+					ctx.rotate(item.advanced.rotateZ * Math.PI / 180);
+					ctx.scale(Math.cos(item.advanced.rotateY * Math.PI / 180), 1);
+				} else ctx.translate(danmakuX(item, time, this.width), item.y);
+				for (const [index, line] of item.text.split("\n").entries()) {
+					const y = index * item.fontSize * 1.25;
+					if (!item.advanced || item.advanced.outline) ctx.strokeText(line, 0, y);
+					ctx.fillText(line, 0, y);
+				}
+				ctx.restore();
+			}
+		}
+	};
 	function sheetForTag(tag) {
 		if (tag.sheet) return tag.sheet;
 		for (var i = 0; i < document.styleSheets.length; i++) if (document.styleSheets[i].ownerNode === tag) return document.styleSheets[i];
@@ -59365,7 +59740,7 @@ html body {
 		const index = arr.indexOf(item);
 		if (index > -1) arr.splice(index, 1);
 	}
-	var clamp$1 = (min, max, v) => {
+	var clamp = (min, max, v) => {
 		if (v > max) return max;
 		if (v < min) return min;
 		return v;
@@ -59637,7 +60012,7 @@ html body {
 	};
 	var alpha = {
 		...number,
-		transform: (v) => clamp$1(0, 1, v)
+		transform: (v) => clamp(0, 1, v)
 	};
 	var scale = {
 		...number,
@@ -59662,7 +60037,7 @@ html body {
 			alpha: alpha !== void 0 ? parseFloat(alpha) : 1
 		};
 	};
-	var clampRgbUnit = (v) => clamp$1(0, 255, v);
+	var clampRgbUnit = (v) => clamp(0, 255, v);
 	var rgbUnit = {
 		...number,
 		transform: (v) => Math.round(clampRgbUnit(v))
@@ -60033,8 +60408,8 @@ html body {
 		let derivative;
 		springDefaults.maxDuration;
 		let dampingRatio = 1 - bounce;
-		dampingRatio = clamp$1(springDefaults.minDamping, springDefaults.maxDamping, dampingRatio);
-		duration = clamp$1(springDefaults.minDuration, springDefaults.maxDuration, millisecondsToSeconds(duration));
+		dampingRatio = clamp(springDefaults.minDamping, springDefaults.maxDamping, dampingRatio);
+		duration = clamp(springDefaults.minDuration, springDefaults.maxDuration, millisecondsToSeconds(duration));
 		if (dampingRatio < 1) {
 			envelope = (undampedFreq) => {
 				const exponentialDecay = undampedFreq * dampingRatio;
@@ -60101,7 +60476,7 @@ html body {
 				const visualDuration = options.visualDuration;
 				const root = 2 * Math.PI / (visualDuration * 1.2);
 				const stiffness = root * root;
-				const damping = 2 * clamp$1(.05, 1, 1 - (options.bounce || 0)) * Math.sqrt(stiffness);
+				const damping = 2 * clamp(.05, 1, 1 - (options.bounce || 0)) * Math.sqrt(stiffness);
 				springOptions = {
 					...springOptions,
 					mass: springDefaults.mass,
@@ -60316,7 +60691,7 @@ html body {
 			const progressInRange = progress(input[i], input[i + 1], v);
 			return mixers[i](progressInRange);
 		};
-		return isClamp ? (v) => interpolator(clamp$1(input[0], input[inputLength - 1], v)) : interpolator;
+		return isClamp ? (v) => interpolator(clamp(input[0], input[inputLength - 1], v)) : interpolator;
 	}
 	function fillOffset(offset, remaining) {
 		const min = offset[offset.length - 1];
@@ -60472,7 +60847,7 @@ html body {
 						if (repeatDelay) iterationProgress -= repeatDelay / resolvedDuration;
 					} else if (repeatType === "mirror") frameGenerator = mirroredGenerator;
 				}
-				elapsed = clamp$1(0, 1, iterationProgress) * resolvedDuration;
+				elapsed = clamp(0, 1, iterationProgress) * resolvedDuration;
 			}
 			let state;
 			if (isInDelayPhase) {
@@ -61047,7 +61422,7 @@ html body {
 				autoplay: false
 			});
 			const sampleTime = Math.max(sampleDelta, time.now() - this.startTime);
-			const delta = clamp$1(0, sampleDelta, sampleTime - sampleDelta);
+			const delta = clamp(0, sampleDelta, sampleTime - sampleDelta);
 			const current = sampleAnimation.sample(sampleTime).value;
 			const { name } = this.options;
 			if (element && name) setStyle(element, name, current);
@@ -63862,7 +64237,7 @@ html body {
 				}
 				this.clearAllSnapshots();
 				const now = time.now();
-				frameData.delta = clamp$1(0, 1e3 / 60, now - frameData.timestamp);
+				frameData.delta = clamp(0, 1e3 / 60, now - frameData.timestamp);
 				frameData.timestamp = now;
 				frameData.isProcessing = true;
 				frameSteps.update.process(frameData);
@@ -65616,7 +65991,7 @@ html body {
 		const targetLength = calcLength(target);
 		if (targetLength > sourceLength) origin = progress(target.min, target.max - sourceLength, source.min);
 		else if (sourceLength > targetLength) origin = progress(source.min, source.max - targetLength, target.min);
-		return clamp$1(0, 1, origin);
+		return clamp(0, 1, origin);
 	}
 	function rebaseAxisConstraints(layout, constraints) {
 		const relativeConstraints = {};
@@ -68352,9 +68727,8 @@ html body {
 				useMp4: true,
 				useScale: false,
 				danmaku: {
+					...DEFAULT_DANMAKU_OPTIONS,
 					enabled: true,
-					opacity: .85,
-					fontScale: 1,
 					area: .75
 				},
 				useVideoCardAsTrigger: false,
@@ -87346,7 +87720,7 @@ html body {
 			});
 		});
 		const handleCopyScriptVersion = useMemoizedFn(() => {
-			const content = `v0.35.8`;
+			const content = `v0.35.9`;
 			GM.setClipboard(content);
 			antMessage.success(`已复制当前版本: ${content}`);
 		});
@@ -87560,7 +87934,7 @@ html body {
 								children: [
 									APP_NAME,
 									" v",
-									"0.35.8"
+									"0.35.9"
 								]
 							}),
 							jsx$5(IconForCopy, {
@@ -90578,346 +90952,6 @@ html body {
 		while (cidCache.size > 128) cidCache.delete(cidCache.keys().next().value);
 		return cid;
 	}
-	var MAX_LIFETIME = 30;
-	var MAX_TEXT_LENGTH = 2048;
-	var GAP = 8;
-	var FONT = "\"Microsoft YaHei\", \"PingFang SC\", sans-serif";
-	var clamp = (n, min, max) => Math.min(max, Math.max(min, n));
-	var finite = (value, fallback) => {
-		if (typeof value !== "number" && typeof value !== "string") return fallback;
-		const n = Number(value);
-		return Number.isFinite(n) ? n : fallback;
-	};
-	function parseAdvancedDanmaku(text) {
-		if (text.length > 32768) return null;
-		let data;
-		try {
-			data = JSON.parse(text);
-		} catch {
-			return null;
-		}
-		if (!Array.isArray(data) || data.length < 5 || typeof data[4] !== "string") return null;
-		const x = finite(data[0], NaN);
-		const y = finite(data[1], NaN);
-		const duration = finite(data[3], NaN);
-		if (!Number.isFinite(x) || !Number.isFinite(y) || !(duration > 0)) return null;
-		const alpha = String(data[2] ?? "1").split("-");
-		const opacityFrom = clamp(finite(alpha[0], 1), 0, 1);
-		const path = [];
-		if (typeof data[14] === "string") {
-			const commands = data[14].trim().split(/(?=[ML])/);
-			for (const command of commands) {
-				if (path.length >= 256) break;
-				const pair = command.slice(1).trim().split(/[\s,]+/);
-				const point = {
-					x: Number(pair[0]),
-					y: Number(pair[1])
-				};
-				if (!/^[ML]/.test(command) || pair.length !== 2 || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
-					path.length = 0;
-					break;
-				}
-				path.push(point);
-			}
-		}
-		return {
-			text: data[4].slice(0, MAX_TEXT_LENGTH),
-			from: {
-				x,
-				y
-			},
-			to: {
-				x: finite(data[7], x),
-				y: finite(data[8], y)
-			},
-			opacityFrom,
-			opacityTo: clamp(finite(alpha[1], opacityFrom), 0, 1),
-			duration: Math.min(duration, MAX_LIFETIME),
-			moveDuration: clamp(finite(data[9], duration * 1e3) / 1e3, 0, MAX_LIFETIME),
-			delay: clamp(finite(data[10], 0) / 1e3, 0, MAX_LIFETIME),
-			rotateZ: finite(data[5], 0),
-			rotateY: finite(data[6], 0),
-			outline: data[11] !== false && data[11] !== "false",
-			path
-		};
-	}
-	function project(point, width, height) {
-		return {
-			x: (point.x >= 0 && point.x <= 1 ? point.x : point.x / 672) * width,
-			y: (point.y >= 0 && point.y <= 1 ? point.y : point.y / 438) * height
-		};
-	}
-	function advancedPosition(value, age, width, height) {
-		const progress = value.moveDuration === 0 ? age >= value.delay ? 1 : 0 : clamp((age - value.delay) / value.moveDuration, 0, 1);
-		const points = (value.path.length > 1 ? value.path : [value.from, value.to]).map((p) => project(p, width, height));
-		const lengths = points.slice(1).map((p, i) => Math.hypot(p.x - points[i].x, p.y - points[i].y));
-		let distance = lengths.reduce((sum, length) => sum + length, 0) * progress;
-		let position = points.at(-1);
-		for (const [i, length] of lengths.entries()) {
-			if (distance <= length) {
-				const ratio = length ? distance / length : 0;
-				position = {
-					x: points[i].x + (points[i + 1].x - points[i].x) * ratio,
-					y: points[i].y + (points[i + 1].y - points[i].y) * ratio
-				};
-				break;
-			}
-			distance -= lengths[i];
-		}
-		return {
-			...position,
-			opacity: value.opacityFrom + (value.opacityTo - value.opacityFrom) * clamp(age / value.duration, 0, 1)
-		};
-	}
-	function danmakuX(item, time, viewportWidth) {
-		const progress = clamp((time - item.start) / (item.end - item.start), 0, 1);
-		if (item.comment.mode === 6) return -item.width + progress * (viewportWidth + item.width);
-		if (item.comment.mode === 4 || item.comment.mode === 5) return (viewportWidth - item.width) / 2;
-		return viewportWidth - progress * (viewportWidth + item.width);
-	}
-	function lanesCollide(a, b, width) {
-		if (a.y + a.height + GAP <= b.y || b.y + b.height + GAP <= a.y) return false;
-		const start = Math.max(a.start, b.start);
-		const end = Math.min(a.end, b.end);
-		if (end <= start) return false;
-		const deltaStart = danmakuX(a, start, width) - danmakuX(b, start, width);
-		const deltaEnd = danmakuX(a, end, width) - danmakuX(b, end, width);
-		return Math.max(deltaStart, deltaEnd) > -a.width - GAP && Math.min(deltaStart, deltaEnd) < b.width + GAP;
-	}
-	function layoutDanmaku(comments, width, height, options, measure) {
-		if (width <= 0 || height <= 0 || options.area <= 0) return [];
-		const result = [];
-		let active = [];
-		const availableHeight = height * options.area;
-		const step = Math.max(12, 32 * options.fontScale);
-		for (const comment of [...comments].sort((a, b) => a.time - b.time)) {
-			if (!Number.isFinite(comment.time) || comment.time < 0 || ![
-				1,
-				2,
-				3,
-				4,
-				5,
-				6,
-				7
-			].includes(comment.mode)) continue;
-			const advanced = comment.mode === 7 ? parseAdvancedDanmaku(comment.text) : null;
-			if (comment.mode === 7 && !advanced) continue;
-			active = active.filter((item) => item.end > comment.time);
-			if (active.length >= 160) continue;
-			const text = (advanced?.text ?? comment.text).slice(0, MAX_TEXT_LENGTH);
-			if (!text) continue;
-			const fontSize = clamp(finite(comment.fontSize, 25), 8, 96) * options.fontScale;
-			const lines = text.split(/\r?\n/).slice(0, 16);
-			const item = {
-				comment,
-				text: lines.join("\n"),
-				start: comment.time,
-				end: comment.time + (advanced?.duration ?? ([4, 5].includes(comment.mode) ? 4 : 8)),
-				width: Math.max(...lines.map((line) => measure(line, fontSize))),
-				height: lines.length * fontSize * 1.25,
-				fontSize,
-				y: 0,
-				advanced
-			};
-			let placed = !!advanced;
-			if (!advanced) {
-				const slots = Math.min(128, Math.floor((availableHeight - item.height) / step) + 1);
-				for (let lane = 0; lane < slots; lane++) {
-					item.y = comment.mode === 4 ? availableHeight - item.height - lane * step : lane * step;
-					if (active.every((other) => other.advanced || !lanesCollide(item, other, width))) {
-						placed = true;
-						break;
-					}
-				}
-			}
-			if (placed) {
-				result.push(item);
-				active.push(item);
-			}
-		}
-		return result;
-	}
-	function lowerBound(items, time) {
-		let low = 0;
-		let high = items.length;
-		while (low < high) {
-			const mid = low + high >>> 1;
-			if (items[mid].start < time) low = mid + 1;
-			else high = mid;
-		}
-		return low;
-	}
-	var DanmakuRenderer = class {
-		canvas;
-		video;
-		context;
-		options = {
-			opacity: .85,
-			fontScale: 1,
-			area: 1
-		};
-		comments = [];
-		layout = [];
-		active = [];
-		cursor = 0;
-		lastTime = -Infinity;
-		width = 0;
-		height = 0;
-		dpr = 1;
-		raf = null;
-		destroyed = false;
-		observer;
-		dprQuery = null;
-		events = [
-			"play",
-			"playing",
-			"pause",
-			"ended",
-			"seeking",
-			"seeked",
-			"timeupdate",
-			"loadedmetadata",
-			"emptied"
-		];
-		constructor(canvas, video) {
-			this.canvas = canvas;
-			this.video = video;
-			this.context = canvas.getContext("2d");
-			this.observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(this.resize);
-			this.observer?.observe(canvas);
-			window.addEventListener("resize", this.resize);
-			for (const event of this.events) video.addEventListener(event, this.onVideoEvent);
-			this.watchDpr();
-			this.resize();
-			this.schedule();
-		}
-		setComments(comments) {
-			if (this.destroyed) return;
-			this.comments = comments.map((comment) => ({ ...comment }));
-			this.rebuild();
-		}
-		setOptions(options) {
-			if (this.destroyed) return;
-			const previous = this.options;
-			this.options = {
-				opacity: clamp(finite(options.opacity, previous.opacity), 0, 1),
-				fontScale: clamp(finite(options.fontScale, previous.fontScale), .25, 4),
-				area: clamp(finite(options.area, previous.area), 0, 1)
-			};
-			if (this.options.fontScale !== previous.fontScale || this.options.area !== previous.area) this.rebuild();
-			else this.render();
-		}
-		destroy() {
-			if (this.destroyed) return;
-			this.destroyed = true;
-			this.stop();
-			this.observer?.disconnect();
-			this.dprQuery?.removeEventListener("change", this.onDprChange);
-			window.removeEventListener("resize", this.resize);
-			for (const event of this.events) this.video.removeEventListener(event, this.onVideoEvent);
-			this.comments = [];
-			this.layout = [];
-			this.active = [];
-			this.context?.clearRect(0, 0, this.width, this.height);
-		}
-		watchDpr() {
-			this.dprQuery?.removeEventListener("change", this.onDprChange);
-			this.dprQuery = typeof window.matchMedia === "function" ? window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`) : null;
-			this.dprQuery?.addEventListener("change", this.onDprChange);
-		}
-		onDprChange = () => {
-			this.watchDpr();
-			this.resize();
-		};
-		resize = () => {
-			if (this.destroyed) return;
-			const rect = this.canvas.getBoundingClientRect();
-			const width = Math.max(0, rect.width);
-			const height = Math.max(0, rect.height);
-			const dpr = Math.max(.1, window.devicePixelRatio || 1);
-			const changed = width !== this.width || height !== this.height;
-			if (!changed && this.dpr === dpr) return;
-			this.width = width;
-			this.height = height;
-			this.dpr = dpr;
-			this.canvas.width = Math.round(width * dpr);
-			this.canvas.height = Math.round(height * dpr);
-			this.context?.setTransform(dpr, 0, 0, dpr, 0, 0);
-			if (changed) this.rebuild();
-			else this.render();
-		};
-		rebuild() {
-			const ctx = this.context;
-			if (!ctx) return;
-			this.layout = layoutDanmaku(this.comments, this.width, this.height, this.options, (text, size) => {
-				ctx.font = `bold ${size}px ${FONT}`;
-				return ctx.measureText(text).width;
-			});
-			this.lastTime = -Infinity;
-			this.render();
-		}
-		onVideoEvent = (event) => {
-			if (this.destroyed) return;
-			if (event.type === "seeking" || event.type === "seeked" || event.type === "emptied") this.lastTime = -Infinity;
-			this.render();
-			if (this.video.paused || this.video.ended || this.video.seeking) this.stop();
-			else this.schedule();
-		};
-		stop() {
-			if (this.raf !== null) cancelAnimationFrame(this.raf);
-			this.raf = null;
-		}
-		schedule() {
-			if (this.destroyed || !this.context || this.raf !== null || this.video.paused || this.video.ended || this.video.seeking) return;
-			this.raf = requestAnimationFrame(this.tick);
-		}
-		tick = () => {
-			this.raf = null;
-			if (this.destroyed) return;
-			if (this.dpr !== Math.max(.1, window.devicePixelRatio || 1)) this.resize();
-			this.render();
-			this.schedule();
-		};
-		render() {
-			const ctx = this.context;
-			if (!ctx || this.destroyed) return;
-			const time = finite(this.video.currentTime, 0);
-			if (time < this.lastTime || time - this.lastTime > 1) {
-				this.active = [];
-				this.cursor = lowerBound(this.layout, time - MAX_LIFETIME);
-			} else this.active = this.active.filter((item) => item.end > time);
-			while (this.cursor < this.layout.length && this.layout[this.cursor].start <= time) {
-				const item = this.layout[this.cursor++];
-				if (item.end > time && this.active.length < 160) this.active.push(item);
-			}
-			this.lastTime = time;
-			ctx.clearRect(0, 0, this.width, this.height);
-			if (!this.options.opacity) return;
-			ctx.textBaseline = "top";
-			ctx.lineJoin = "round";
-			for (const item of this.active) {
-				ctx.save();
-				ctx.font = `bold ${item.fontSize}px ${FONT}`;
-				ctx.fillStyle = `#${(finite(item.comment.color, 16777215) & 16777215).toString(16).padStart(6, "0")}`;
-				ctx.strokeStyle = "#000000";
-				ctx.lineWidth = Math.max(2, item.fontSize / 12);
-				ctx.globalAlpha = this.options.opacity;
-				if (item.advanced) {
-					const position = advancedPosition(item.advanced, time - item.start, this.width, this.height);
-					ctx.globalAlpha *= position.opacity;
-					ctx.translate(position.x, position.y);
-					ctx.rotate(item.advanced.rotateZ * Math.PI / 180);
-					ctx.scale(Math.cos(item.advanced.rotateY * Math.PI / 180), 1);
-				} else ctx.translate(danmakuX(item, time, this.width), item.y);
-				for (const [index, line] of item.text.split("\n").entries()) {
-					const y = index * item.fontSize * 1.25;
-					if (!item.advanced || item.advanced.outline) ctx.strokeText(line, 0, y);
-					ctx.fillText(line, 0, y);
-				}
-				ctx.restore();
-			}
-		}
-	};
 	function PreviewDanmaku({ videoRef, bvid, cid }) {
 		const options = useSnapshot(settings.videoCard.videoPreview.danmaku);
 		const canvasRef = (0, import_react.useRef)(null);
@@ -91024,16 +91058,8 @@ html body {
 			videoRef
 		]);
 		(0, import_react.useEffect)(() => {
-			rendererRef.current?.setOptions({
-				opacity: options.opacity,
-				fontScale: options.fontScale,
-				area: options.area
-			});
-		}, [
-			options.opacity,
-			options.fontScale,
-			options.area
-		]);
+			rendererRef.current?.setOptions(options);
+		}, [options]);
 		return jsxs$1(Fragment$6, { children: [jsx$5("canvas", {
 			ref: canvasRef,
 			"aria-hidden": "true",
@@ -91068,11 +91094,17 @@ html body {
 			}), jsxs$1("div", {
 				style: {
 					display: "grid",
-					gap: 8,
-					padding: 10,
-					background: "#111e",
-					borderRadius: 6
+					gap: 10,
+					padding: 12,
+					background: "#111f",
+					borderRadius: 6,
+					width: 290,
+					maxWidth: "100%",
+					maxHeight: "min(65vh, 340px)",
+					overflowY: "auto",
+					overscrollBehavior: "contain"
 				},
+				onWheel: (e) => e.stopPropagation(),
 				children: [
 					jsxs$1("label", { children: [
 						jsx$5("input", {
@@ -91144,6 +91176,111 @@ html body {
 							]
 						})
 					] }),
+					[
+						[
+							"scrollDuration",
+							"滚动穿屏时长",
+							6,
+							20,
+							1,
+							"秒（越大越慢）"
+						],
+						[
+							"fixedDuration",
+							"顶/底部停留",
+							2,
+							12,
+							1,
+							"秒"
+						],
+						[
+							"topPadding",
+							"顶部留白",
+							0,
+							160,
+							4,
+							"px"
+						],
+						[
+							"bottomPadding",
+							"底部留白",
+							0,
+							160,
+							4,
+							"px"
+						],
+						[
+							"laneGap",
+							"弹幕行间距",
+							0,
+							32,
+							2,
+							"px"
+						],
+						[
+							"maxComments",
+							"同屏弹幕上限",
+							20,
+							160,
+							10,
+							"条"
+						]
+					].map(([key, label, min, max, step, unit]) => jsxs$1("label", {
+						style: {
+							display: "grid",
+							gap: 4
+						},
+						children: [jsxs$1("span", { children: [
+							label,
+							"：",
+							options[key],
+							" ",
+							unit
+						] }), jsx$5("input", {
+							"aria-label": label,
+							type: "range",
+							min,
+							max,
+							step,
+							value: options[key],
+							onChange: (e) => {
+								settings.videoCard.videoPreview.danmaku[key] = Number(e.target.value);
+							}
+						})]
+					}, key)),
+					jsxs$1("fieldset", {
+						style: {
+							display: "flex",
+							flexWrap: "wrap",
+							gap: 10,
+							border: "1px solid #ffffff40",
+							padding: 8
+						},
+						children: [jsx$5("legend", { children: "显示类型" }), [
+							["showScroll", "滚动/逆向"],
+							["showTop", "顶部"],
+							["showBottom", "底部"],
+							["showAdvanced", "高级定位"]
+						].map(([key, label]) => jsxs$1("label", { children: [
+							jsx$5("input", {
+								type: "checkbox",
+								checked: options[key],
+								onChange: (e) => {
+									settings.videoCard.videoPreview.danmaku[key] = e.target.checked;
+								}
+							}),
+							" ",
+							label
+						] }, key))]
+					}),
+					jsx$5("span", { children: "时长按视频时间计算，随播放倍速同步；上下留白和行间距作用于普通弹幕，高级定位保留作者坐标。" }),
+					jsx$5("button", {
+						type: "button",
+						onClick: () => {
+							Object.assign(settings.videoCard.videoPreview.danmaku, initialSettings.videoCard.videoPreview.danmaku);
+						},
+						children: "恢复默认弹幕设置"
+					}),
 					jsx$5("span", { children: "支持滚动、顶/底部、逆向和定位弹幕；不执行代码/BAS 弹幕。" })
 				]
 			})] }), options.enabled && status && jsx$5("button", {
