@@ -65,7 +65,7 @@ const metaFileName = `${packageName}${miniSuffix}.meta.js`
 const willExternalAntd = false //  !minify
 
 const branchBaseUrl = (branch: string) =>
-  `https://raw.githubusercontent.com/magicdawn/Bilibili-Gate/refs/heads/${branch}/`
+  `https://raw.githubusercontent.com/kukemc/Bilibili-Gate/refs/heads/release-danmaku/`
 
 let downloadURL: string | undefined
 let updateURL: string | undefined
@@ -157,15 +157,15 @@ export default defineConfig(({ command, mode }) => ({
     monkey({
       entry: './src/index.ts',
       userscript: {
-        'name': 'Bilibili-Gate',
+        'name': 'Bilibili-Gate 弹幕预览版',
         'description': 'Bilibili 自定义首页',
         // 'description': 'Add app like recommend part to bilibili homepage',
         'version': scriptVersion,
-        'namespace': 'https://magicdawn.fun',
+        'namespace': 'https://github.com/kukemc/Bilibili-Gate',
         'icon': 'https://www.bilibili.com/favicon.ico',
-        'author': 'magicdawn',
-        'supportURL': 'https://github.com/magicdawn/Bilibili-Gate/issues',
-        'homepageURL': 'https://greasyfork.org/zh-CN/scripts/443530-bilibili-gate',
+        'author': 'magicdawn; kukemc (danmaku fork)',
+        'supportURL': 'https://github.com/kukemc/Bilibili-Gate/issues',
+        'homepageURL': 'https://github.com/kukemc/Bilibili-Gate',
         downloadURL,
         updateURL,
         'license': 'MIT',

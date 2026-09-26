@@ -25,6 +25,7 @@ import { VideoCardActionButton } from '../VideoCard/child-components/VideoCardAc
 import { fetchVideoPreviewData, isVideoPreviewDataValid, type VideoPreviewData } from '../VideoCard/services'
 import { getRecItemDimension } from '../VideoCard/use/useOpenRelated'
 import { LargePreview } from './index'
+import { PreviewDanmaku } from './PreviewDanmaku'
 import { RecoverableVideo } from './RecoverableVideo'
 import type { RecSharedEmitter } from '$components/Recommends/rec.shared'
 import type { CssProp } from '$utility/type'
@@ -263,8 +264,24 @@ export function useLargePreviewRelated({
             <source key={i} src={url} />
           ))}
         </RecoverableVideo>
+        <PreviewDanmaku videoRef={videoRef} bvid={bvid} cid={videoPreviewDataBox.state?.cid ?? cid} />
         {/* action buttons */}
         <div className='absolute right-10px top-10px flex flex-row-reverse items-center justify-start gap-x-5px'>
+          <VideoCardActionButton
+            inlinePosition='right'
+            icon={<span className='text-12px'>全屏</span>}
+            tooltip='带弹幕全屏（原生视频全屏不包含弹幕）'
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              const container = videoRef.current?.parentElement
+              if (document.fullscreenElement) void document.exitFullscreen().catch(() => {})
+              else if (container?.requestFullscreen) {
+                showBy('click', 'popover-video-fullscreen-button')
+                void container.requestFullscreen().catch(() => {})
+              }
+            }}
+          />
           {triggerAction.state === 'click' ? (
             <VideoCardActionButton
               inlinePosition={'right'}

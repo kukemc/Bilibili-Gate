@@ -12,7 +12,7 @@
     "_lint": "oxlint && eslint",
     "typecheck": "turbo _typecheck",
     "lint": "turbo _lint",
-    "build:scss": "typed-scss-modules 'src/**/*.module.scss'",
+    "build:scss": "typed-scss-modules \"src/**/*.module.scss\"",
     "build:vite": "vite build",
     "//": "//",
     "check": "turbo _typecheck _lint",

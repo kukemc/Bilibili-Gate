@@ -1,4 +1,12 @@
-﻿# Bilibili-Gate
+# Bilibili-Gate
+
+## 本 fork：浮动预览弹幕版
+
+👉 [安装弹幕版用户脚本](https://raw.githubusercontent.com/kukemc/Bilibili-Gate/refs/heads/release-danmaku/bilibili-gate.user.js) · [功能范围、验证与构建说明](DANMAKU.md)
+
+安装后请禁用原版 Bilibili-Gate，避免两个脚本重复运行。打开视频卡片的「浮动预览」，默认自动加载当前视频/分 P 弹幕；左上角可开关弹幕、调整字号、透明度和区域，右上角「全屏」保留弹幕层。
+
+此版支持常规弹幕和部分高级定位弹幕，不宣称与官方播放器全部特性等价（代码弹幕、BAS 不支持）。下方保留上游说明，原版安装链接不是本 fork 的安装包。
 
 > Bilibili 自定义首页
 

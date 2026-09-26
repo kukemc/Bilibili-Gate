@@ -87,6 +87,7 @@ export const initialSettings = {
     videoPreview: {
       useMp4: true, // mp4 | dash (mp4: single video, dash: video only, no audio)
       useScale: false, // scale effect
+      danmaku: { enabled: true, opacity: 0.85, fontScale: 1, area: 0.75 },
       useVideoCardAsTrigger: false, // video card as trigger, v0.31.0 第一个版本就是这样的, 后改为 ActionButton
       usePreferredCdn: true,
       addTo: {
