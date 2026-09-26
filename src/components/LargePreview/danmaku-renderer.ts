@@ -3,8 +3,38 @@ import type { DanmakuComment } from './danmaku-data'
 export interface DanmakuOptions {
   opacity?: number
   fontScale?: number
-  /** Fraction of the canvas height available to ordinary comments (0..1). */
+  /** Fraction of the padded canvas height available to ordinary comments (0..1). */
   area?: number
+  /** Seconds for a scrolling comment to cross the viewport (6..20). */
+  scrollDuration?: number
+  /** Seconds to display top/bottom comments (2..12). */
+  fixedDuration?: number
+  /** Reserved space in CSS pixels (0..160). */
+  topPadding?: number
+  bottomPadding?: number
+  /** Minimum vertical space between ordinary comments in CSS pixels (0..32). */
+  laneGap?: number
+  maxComments?: number
+  showScroll?: boolean
+  showTop?: boolean
+  showBottom?: boolean
+  showAdvanced?: boolean
+}
+
+export const DEFAULT_DANMAKU_OPTIONS: Required<DanmakuOptions> = {
+  opacity: 0.85,
+  fontScale: 1,
+  area: 1,
+  scrollDuration: 12,
+  fixedDuration: 5,
+  topPadding: 40,
+  bottomPadding: 48,
+  laneGap: 4,
+  maxComments: 100,
+  showScroll: true,
+  showTop: true,
+  showBottom: true,
+  showAdvanced: true,
 }
 
 export const MAX_ACTIVE_DANMAKU = 160
@@ -17,6 +47,27 @@ const finite = (value: unknown, fallback: number): number => {
   if (typeof value !== 'number' && typeof value !== 'string') return fallback
   const n = Number(value)
   return Number.isFinite(n) ? n : fallback
+}
+
+function normalizeOptions(
+  options: DanmakuOptions,
+  fallback: Required<DanmakuOptions> = DEFAULT_DANMAKU_OPTIONS,
+): Required<DanmakuOptions> {
+  return {
+    opacity: clamp(finite(options.opacity, fallback.opacity), 0, 1),
+    fontScale: clamp(finite(options.fontScale, fallback.fontScale), 0.25, 4),
+    area: clamp(finite(options.area, fallback.area), 0, 1),
+    scrollDuration: clamp(finite(options.scrollDuration, fallback.scrollDuration), 6, 20),
+    fixedDuration: clamp(finite(options.fixedDuration, fallback.fixedDuration), 2, 12),
+    topPadding: clamp(finite(options.topPadding, fallback.topPadding), 0, 160),
+    bottomPadding: clamp(finite(options.bottomPadding, fallback.bottomPadding), 0, 160),
+    laneGap: clamp(finite(options.laneGap, fallback.laneGap), 0, 32),
+    maxComments: Math.floor(clamp(finite(options.maxComments, fallback.maxComments), 20, MAX_ACTIVE_DANMAKU)),
+    showScroll: typeof options.showScroll === 'boolean' ? options.showScroll : fallback.showScroll,
+    showTop: typeof options.showTop === 'boolean' ? options.showTop : fallback.showTop,
+    showBottom: typeof options.showBottom === 'boolean' ? options.showBottom : fallback.showBottom,
+    showAdvanced: typeof options.showAdvanced === 'boolean' ? options.showAdvanced : fallback.showAdvanced,
+  }
 }
 
 type Point = { x: number; y: number }
@@ -137,8 +188,13 @@ export function danmakuX(item: DanmakuLayoutItem, time: number, viewportWidth: n
 }
 
 /** Exact linear swept-box test, including a faster follower catching up later. */
-export function lanesCollide(a: DanmakuLayoutItem, b: DanmakuLayoutItem, width: number): boolean {
-  if (a.y + a.height + GAP <= b.y || b.y + b.height + GAP <= a.y) return false
+export function lanesCollide(
+  a: DanmakuLayoutItem,
+  b: DanmakuLayoutItem,
+  width: number,
+  gap = DEFAULT_DANMAKU_OPTIONS.laneGap,
+): boolean {
+  if (a.y + a.height + gap <= b.y || b.y + b.height + gap <= a.y) return false
   const start = Math.max(a.start, b.start)
   const end = Math.min(a.end, b.end)
   if (end <= start) return false
@@ -152,29 +208,43 @@ export function layoutDanmaku(
   comments: readonly DanmakuComment[],
   width: number,
   height: number,
-  options: Required<DanmakuOptions>,
+  options: DanmakuOptions,
   measure: (text: string, fontSize: number) => number,
 ): DanmakuLayoutItem[] {
-  if (width <= 0 || height <= 0 || options.area <= 0) return []
+  const settings = normalizeOptions(options)
+  if (width <= 0 || height <= 0 || settings.area <= 0) return []
   const result: DanmakuLayoutItem[] = []
   let active: DanmakuLayoutItem[] = []
-  const availableHeight = height * options.area
-  const step = Math.max(12, 32 * options.fontScale)
+  // Shrink both paddings proportionally on small viewports, reserving one default-font lane.
+  const padding = settings.topPadding + settings.bottomPadding
+  const minimumHeight = Math.min(height, (25 * settings.fontScale * 1.25) / settings.area)
+  const paddingScale = padding ? Math.min(1, Math.max(0, height - minimumHeight) / padding) : 1
+  const top = settings.topPadding * paddingScale
+  const availableHeight = (height - padding * paddingScale) * settings.area
   for (const comment of [...comments].sort((a, b) => a.time - b.time)) {
     if (!Number.isFinite(comment.time) || comment.time < 0 || ![1, 2, 3, 4, 5, 6, 7].includes(comment.mode)) continue
+    if (
+      (comment.mode === 7 && !settings.showAdvanced) ||
+      (comment.mode === 5 && !settings.showTop) ||
+      (comment.mode === 4 && !settings.showBottom) ||
+      ([1, 2, 3, 6].includes(comment.mode) && !settings.showScroll)
+    )
+      continue
     const advanced = comment.mode === 7 ? parseAdvancedDanmaku(comment.text) : null
     if (comment.mode === 7 && !advanced) continue
     active = active.filter((item) => item.end > comment.time)
-    if (active.length >= MAX_ACTIVE_DANMAKU) continue
+    if (active.length >= settings.maxComments) continue
     const text = (advanced?.text ?? comment.text).slice(0, MAX_TEXT_LENGTH)
     if (!text) continue
-    const fontSize = clamp(finite(comment.fontSize, 25), 8, 96) * options.fontScale
+    const fontSize = clamp(finite(comment.fontSize, 25), 8, 96) * settings.fontScale
     const lines = text.split(/\r?\n/).slice(0, 16)
     const item: DanmakuLayoutItem = {
       comment,
       text: lines.join('\n'),
       start: comment.time,
-      end: comment.time + (advanced?.duration ?? ([4, 5].includes(comment.mode) ? 4 : 8)),
+      end:
+        comment.time +
+        (advanced?.duration ?? ([4, 5].includes(comment.mode) ? settings.fixedDuration : settings.scrollDuration)),
       width: Math.max(...lines.map((line) => measure(line, fontSize))),
       height: lines.length * fontSize * 1.25,
       fontSize,
@@ -183,10 +253,11 @@ export function layoutDanmaku(
     }
     let placed = !!advanced
     if (!advanced) {
+      const step = item.height + settings.laneGap
       const slots = Math.min(128, Math.floor((availableHeight - item.height) / step) + 1)
       for (let lane = 0; lane < slots; lane++) {
-        item.y = comment.mode === 4 ? availableHeight - item.height - lane * step : lane * step
-        if (active.every((other) => other.advanced || !lanesCollide(item, other, width))) {
+        item.y = top + (comment.mode === 4 ? availableHeight - item.height - lane * step : lane * step)
+        if (active.every((other) => other.advanced || !lanesCollide(item, other, width, settings.laneGap))) {
           placed = true
           break
         }
@@ -213,7 +284,7 @@ function lowerBound(items: DanmakuLayoutItem[], time: number): number {
 
 export class DanmakuRenderer {
   private readonly context: CanvasRenderingContext2D | null
-  private options: Required<DanmakuOptions> = { opacity: 0.85, fontScale: 1, area: 1 }
+  private options: Required<DanmakuOptions> = { ...DEFAULT_DANMAKU_OPTIONS }
   private comments: DanmakuComment[] = []
   private layout: DanmakuLayoutItem[] = []
   private active: DanmakuLayoutItem[] = []
@@ -261,12 +332,11 @@ export class DanmakuRenderer {
   setOptions(options: DanmakuOptions): void {
     if (this.destroyed) return
     const previous = this.options
-    this.options = {
-      opacity: clamp(finite(options.opacity, previous.opacity), 0, 1),
-      fontScale: clamp(finite(options.fontScale, previous.fontScale), 0.25, 4),
-      area: clamp(finite(options.area, previous.area), 0, 1),
-    }
-    if (this.options.fontScale !== previous.fontScale || this.options.area !== previous.area) this.rebuild()
+    this.options = normalizeOptions(options, previous)
+    const layoutChanged = (Object.keys(this.options) as (keyof DanmakuOptions)[]).some(
+      (key) => key !== 'opacity' && this.options[key] !== previous[key],
+    )
+    if (layoutChanged) this.rebuild()
     else this.render()
   }
 
@@ -373,7 +443,7 @@ export class DanmakuRenderer {
     }
     while (this.cursor < this.layout.length && this.layout[this.cursor].start <= time) {
       const item = this.layout[this.cursor++]
-      if (item.end > time && this.active.length < MAX_ACTIVE_DANMAKU) this.active.push(item)
+      if (item.end > time && this.active.length < this.options.maxComments) this.active.push(item)
     }
     this.lastTime = time
     ctx.clearRect(0, 0, this.width, this.height)
